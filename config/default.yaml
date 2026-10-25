@@ -1,0 +1,139 @@
+# USD/JPY スイング戦略 検証設定
+# 日時はすべて MT5 サーバー時刻（ブローカー時刻）で記述する。
+
+symbol: USDJPY
+pip_size: 0.01            # 1 pip = 0.01 JPY
+
+mt5:
+  terminal_path: null     # null なら既定の MT5 を使用。例: "C:/Program Files/MetaTrader 5/terminal64.exe"
+  # 口座情報は設定ファイルに書かない。必要なら環境変数 MT5_LOGIN / MT5_PASSWORD / MT5_SERVER を使う。
+  timeout_ms: 60000
+  max_retries: 3
+
+data:
+  dir: data/raw
+  timeframes: [H1, H4, D1]
+  start: "2015-01-01"
+  end: "2025-12-31"
+  # サーバー時刻のタイムゾーン（ブローカー依存）。多くの MT5 業者は NY クローズ基準 (UTC+2/+3)。
+  # 固定オフセット "+02:00" または IANA 名（例 "Etc/GMT-2", "Europe/Athens"）を指定。
+  server_timezone: "Europe/Athens"
+
+validation:
+  min_bars:
+    H1: 5000
+    H4: 1500
+    D1: 300
+  max_intraweek_gap_hours: 4        # 週末以外でこれを超える空白は「欠損」
+  allowed_gap_dates: ["12-25", "01-01"]  # この月日を含む空白は休場として許容
+  max_gap_events: 20                # 欠損がこれを超えたら停止
+  max_abs_return: 0.05              # 1 本で 5% を超える変動は異常値として停止
+  max_zero_volume_ratio: 0.01
+  cross_tf_tolerance_pips: 3.0      # H4/D1 と H1 集計との許容差
+  max_cross_tf_mismatch_ratio: 0.02 # 許容差を超える足の割合の上限
+  expected_daily_bars_per_week: 5   # 6 なら日曜足があるブローカー（時刻設定を要確認）
+
+costs:
+  spread_pips: 0.3
+  use_bar_spread: false      # true なら max(固定, 足の spread 列) を使う
+  slippage_pips: 0.2         # エントリー・決済それぞれに不利方向へ
+  swap_long_pips_per_day: 1.5
+  swap_short_pips_per_day: -2.5
+  triple_swap_weekday: 2     # 0=月 ... 2=水
+
+backtest:
+  execution_tf: H1
+  max_hold_hours: 72         # 最大保有 3 日
+  cooldown_bars: 4           # 決済後に新規エントリーを禁止する H1 本数
+  same_bar_policy: stop_first  # 同一足で SL/TP 両到達時は SL 優先
+
+periods:
+  development_start: "2016-01-01"   # 指標のウォームアップに 2015 年を使う
+  development_end: "2022-12-31"
+  holdout_start: "2023-01-01"       # 未使用の検証期間（開発中は参照しない）
+  holdout_end: "2025-12-31"
+
+walkforward:
+  train_months: 24
+  test_months: 6
+  step_months: 6
+  min_train_trades: 30
+  objective: expectancy_r    # 学習窓でのパラメーター選択基準
+
+stats:
+  bootstrap_samples: 5000
+  significance_level: 0.05
+  random_seed: 42
+
+strategies:
+  pullback:
+    enabled: true
+    params:
+      d1_sma: 50
+      h4_ema_fast: 20
+      h4_ema_slow: 50
+      adx_period: 14
+      adx_min: 20
+      rsi_period: 14
+      rsi_long_trigger: 40     # H1 RSI がこの値を下から上抜けで押し目終了と判定（売りは 100-値 を上から下抜け）
+      atr_period: 14
+      sl_atr: 1.5              # H4 ATR 倍率
+      tp_atr: 2.0
+      max_hold_hours: 72
+    filters:                   # 条件ごとの on/off（アブレーションで個別に検証）
+      d1_trend: true
+      h4_ema_alignment: true
+      h4_adx: true
+      h4_macd: false
+    grid:                      # ウォークフォワードで探索する小さな格子
+      rsi_long_trigger: [35, 40, 45]
+      sl_atr: [1.0, 1.5, 2.0]
+      tp_atr: [1.5, 2.0, 3.0]
+
+  breakout:
+    enabled: true
+    params:
+      range_bars_h4: 30        # 直近 N 本の確定 H4 の高値・安値をレンジとする
+      max_range_atr: 6.0       # レンジ幅 / H4 ATR がこれ以下 = 収縮している
+      adx_period: 14
+      adx_max_before: 25       # ブレイク前の H4 ADX がこれ以下
+      buffer_atr: 0.1          # 高値 + buffer*ATR を超えたらブレイク
+      atr_period: 14
+      sl_atr: 1.5
+      tp_atr: 3.0
+      max_hold_hours: 72
+    filters:
+      range_compression: true
+      low_adx_before: true
+      d1_trend: false
+    grid:
+      range_bars_h4: [20, 30, 45]
+      sl_atr: [1.0, 1.5, 2.0]
+      tp_atr: [2.0, 3.0, 4.0]
+
+  mean_reversion:
+    enabled: true
+    params:
+      h4_sma: 20
+      adx_period: 14
+      adx_max: 20              # H4 ADX がこれ未満ならレンジ相場
+      d1_adx_max: 25
+      rsi_period: 14
+      rsi_oversold: 30         # H1 RSI が下から上抜けで買い（売りは 100-値 を上から下抜け）
+      min_dev_atr: 1.0         # 終値と H4 SMA の乖離が H4 ATR の何倍以上か
+      atr_period: 14
+      sl_atr: 1.5
+      tp_to_mean: true         # 利確 = シグナル時点の H4 SMA までの距離
+      tp_atr: 1.5              # tp_to_mean=false のとき、または下限
+      max_hold_hours: 48
+    filters:
+      h4_low_adx: true
+      d1_low_adx: true
+      deviation: true
+    grid:
+      rsi_oversold: [25, 30, 35]
+      min_dev_atr: [0.5, 1.0, 1.5]
+      sl_atr: [1.0, 1.5, 2.0]
+
+output:
+  dir: results
