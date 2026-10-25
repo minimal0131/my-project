@@ -56,6 +56,10 @@ class FakeMT5:
     def account_info(self):
         return SimpleNamespace(server="Fake-Server", company="Fake Broker")
 
+    def symbol_info(self, symbol):
+        return SimpleNamespace(digits=3, point=0.001, spread=3, spread_float=True, swap_mode=1,
+                               swap_long=1.2, swap_short=-2.4, swap_rollover3days=3)
+
     def copy_rates_range(self, symbol, tf, date_from, date_to):
         self.copy_calls += 1
         if self.fail_copy_times > 0:

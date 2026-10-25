@@ -28,6 +28,7 @@ validation:
   max_intraweek_gap_hours: 4        # 週末以外でこれを超える空白は「欠損」
   allowed_gap_dates: ["12-25", "01-01"]  # この月日を含む空白は休場として許容
   max_gap_events: 20                # 欠損がこれを超えたら停止
+  max_single_gap_hours: 30          # 1 回の欠落（平日分）がこれを超えたら停止
   max_abs_return: 0.05              # 1 本で 5% を超える変動は異常値として停止
   max_zero_volume_ratio: 0.01
   cross_tf_tolerance_pips: 3.0      # H4/D1 と H1 集計との許容差

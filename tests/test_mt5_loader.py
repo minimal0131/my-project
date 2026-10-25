@@ -91,6 +91,7 @@ def test_save_and_load_roundtrip_and_hash_check(tmp_path):
     pd.testing.assert_frame_equal(df[["time", "open", "close"]], res.bars[["time", "open", "close"]],
                                   check_dtype=False)
     assert meta["server"] == "Fake-Server"
+    assert meta["symbol_info"]["swap_rollover3days"] == 3
     # 改ざんを検出する
     text = path.read_text().splitlines()
     text[5] = text[5].replace(text[5].split(",")[1], "999.999", 1)

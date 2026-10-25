@@ -92,6 +92,24 @@ def test_intraweek_gap_is_detected_and_many_gaps_stop(cfg, frames):
     assert _errors(r, "gap")
 
 
+def test_long_single_gap_is_error(cfg, frames):
+    h1 = frames["H1"]
+    cut = (h1["time"] >= "2019-03-01") & (h1["time"] < "2019-06-01")  # 3 か月欠落 = 欠損 1 件
+    r = ValidationReport()
+    check_bars(h1[~cut].reset_index(drop=True), "H1", cfg["validation"], r)
+    assert r.stats["H1_gap_events"] == 1
+    assert _errors(r, "gap")
+
+
+def test_missing_full_weekday_next_to_weekend(cfg, frames):
+    h1 = frames["H1"]
+    cut = h1["time"].dt.normalize() == pd.Timestamp("2019-04-19")  # 金曜が丸ごと欠落（祝日休場など）
+    r = ValidationReport()
+    check_bars(h1[~cut].reset_index(drop=True), "H1", cfg["validation"], r)
+    assert r.stats["H1_gap_events"] == 1 and r.stats["H1_longest_gap_hours"] == 24
+    assert r.ok  # 24 時間 <= 30 時間なので警告のみ
+
+
 def test_allowed_holiday_gap_is_ignored(cfg, frames):
     h1 = frames["H1"]
     cut = h1["time"].dt.strftime("%m-%d") == "12-25"

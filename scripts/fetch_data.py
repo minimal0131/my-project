@@ -10,6 +10,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fxbt.config import load_config  # noqa: E402
@@ -30,7 +32,9 @@ def main(argv: list[str] | None = None) -> int:
         with MT5Loader(terminal_path=m.get("terminal_path"), timeout_ms=m.get("timeout_ms", 60000),
                        max_retries=m.get("max_retries", 3)) as loader:
             for tf in cfg["data"]["timeframes"]:
-                res = loader.fetch(cfg["symbol"], tf, cfg["data"]["start"], cfg["data"]["end"])
+                # 終了日はその日の終わりまで含める
+                end = pd.Timestamp(cfg["data"]["end"]).normalize() + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                res = loader.fetch(cfg["symbol"], tf, cfg["data"]["start"], end)
                 path = storage.save(res, cfg["data"]["dir"])
                 logging.info("%s %s: %d 本 (%s〜%s) -> %s", cfg["symbol"], tf, res.meta["rows"],
                              res.meta["first_bar"], res.meta["last_bar"], path)
