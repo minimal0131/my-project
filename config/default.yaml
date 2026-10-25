@@ -3,6 +3,7 @@
 
 symbol: USDJPY
 pip_size: 0.01            # 1 pip = 0.01 JPY
+point_size: 0.001         # MT5 の spread 列の単位（3 桁表示ブローカー）
 
 mt5:
   terminal_path: null     # null なら既定の MT5 を使用。例: "C:/Program Files/MetaTrader 5/terminal64.exe"
@@ -98,6 +99,7 @@ strategies:
       adx_period: 14
       adx_max_before: 25       # ブレイク前の H4 ADX がこれ以下
       buffer_atr: 0.1          # 高値 + buffer*ATR を超えたらブレイク
+      d1_sma: 50               # d1_trend フィルター用
       atr_period: 14
       sl_atr: 1.5
       tp_atr: 3.0
@@ -124,7 +126,7 @@ strategies:
       atr_period: 14
       sl_atr: 1.5
       tp_to_mean: true         # 利確 = シグナル時点の H4 SMA までの距離
-      tp_atr: 1.5              # tp_to_mean=false のとき、または下限
+      tp_atr: 1.5              # tp_to_mean=false のときの利確 ATR 倍率
       max_hold_hours: 48
     filters:
       h4_low_adx: true
