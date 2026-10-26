@@ -20,7 +20,10 @@ data:
   # "NY+7" = NY クローズ基準（冬 GMT+2 / 夏 GMT+3、米国の夏時間に連動）。MT5 業者で主流。
   #   サーバーの 0 時が常に NY の 17 時になり、日足は週 5 本（日曜足なし）。
   # その他: 固定オフセット "+02:00"、IANA 名 "Europe/Athens"（欧州の夏時間に連動する業者）など。
-  server_timezone: "NY+7"
+  # XM は "Europe/Athens"（2026-10 の実データで確認）。米国と欧州の夏時間がずれる週（3 月・10 月末）は
+  #   NY 17 時の寄り付きがサーバーの日曜 23 時になり、1 時間分の日曜 H1/H4/D1 足ができる。
+  #   日曜の H4/D1 足は検査後に月曜足へ統合する（fxbt/data/resample.py の merge_sunday_bars）。
+  server_timezone: "Europe/Athens"
 
 validation:
   min_bars:
@@ -38,6 +41,8 @@ validation:
   cross_tf_tolerance_pips: 3.0      # H4/D1 と H1 集計との許容差
   max_cross_tf_mismatch_ratio: 0.02 # 許容差を超える足の割合の上限
   expected_daily_bars_per_week: 5   # 6 なら日曜足があるブローカー（時刻設定を要確認）
+  # 週の寄り付きが NY 日曜 17 時、引けが NY 金曜 17 時に一致する週の割合の下限（下回ると警告）
+  min_week_session_match_ratio: 0.95
 
 costs:
   # 想定: 一般的な MT5 業者のスタンダード口座（取引手数料なし、スプレッドに上乗せ）。

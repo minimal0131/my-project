@@ -13,6 +13,8 @@ import pytest
 from fxbt.backtest.costs import CostModel
 from fxbt.backtest.engine import run_backtest
 from fxbt.config import load_config, strategy_params
+from fxbt.data.resample import aggregate, merge_sunday_bars
+from fxbt.data.validation import ny_sunday_open_server
 from fxbt.mtf import MarketData
 from fxbt.strategies import REGISTRY, build
 from fxbt.synthetic import make_all
@@ -285,3 +287,75 @@ def test_mean_reversion_blocked_in_strong_trend():
     longs = np.flatnonzero(s.signal == 1)
     # 強い上昇トレンド中は H4 ADX が高いので押し目でも平均回帰の買いは出ない
     assert not ((longs > 1700) & (longs < 1760)).any()
+
+
+# ------------------------------------------------------------------ 日曜足を含むデータでのルックアヘッド
+def _eu_server_h1():
+    """合成 H1 に、夏時間のずれる週の日曜 23 時の足（欧州連動サーバー = XM で実際にできる足）を足す。"""
+    h1 = make_all("2018-01-01", "2019-07-01", seed=11)["H1"]
+    sundays = pd.Series(pd.date_range("2018-01-07", "2019-06-30", freq="W-SUN"))
+    open_srv = ny_sunday_open_server(sundays, "Europe/Athens")
+    rows = []
+    for t in open_srv[open_srv < sundays + pd.Timedelta(days=1)]:
+        prev = h1[h1.time < t].iloc[-1]
+        nxt = h1[h1.time > t].iloc[0]
+        o, c = prev.close, nxt.open
+        rows.append({"time": t, "open": o, "high": max(o, c) + 0.02, "low": min(o, c) - 0.02, "close": c,
+                     "tick_volume": 100, "spread": 5, "real_volume": 0})
+    assert len(rows) >= 4
+    return pd.concat([h1, pd.DataFrame(rows)]).sort_values("time").reset_index(drop=True)
+
+
+def _prepare(h1, cut=None, merge=merge_sunday_bars):
+    """取得（確定足のみ）→ 日曜足の統合 → MarketData を、cut の確定時点で入手できたデータだけで再現する。"""
+    if cut is not None:
+        h1 = h1[h1.time <= cut]
+    cutoff = None if cut is None else cut + pd.Timedelta(hours=1)
+    higher = {}
+    for tf, dur in (("H4", pd.Timedelta(hours=4)), ("D1", pd.Timedelta(days=1))):
+        df = aggregate(h1, tf).drop(columns="n_h1")
+        if cutoff is not None:
+            df = df[df.time + dur <= cutoff]  # 形成中の足は取得されない
+        higher[tf] = merge(df.reset_index(drop=True), tf)[0]
+    return MarketData(h1, higher["H4"], higher["D1"])
+
+
+def _sunday_cut_points(h1):
+    idx = np.flatnonzero(h1.time.dt.dayofweek.to_numpy() == 6)
+    offsets = [0, 1, 3, 4, 5, 23, 24, 25]  # 日曜足・月曜の H4 確定前後・月曜 D1 確定前後
+    return sorted({int(min(i + o, len(h1) - 2)) for i in idx for o in offsets})
+
+
+def _sunday_lookahead_diffs(name, merge):
+    strat = build(name, _params(name))
+    h1 = _eu_server_h1()
+    full = _condition_frame(strat, _prepare(h1, merge=merge))
+    bad = 0
+    for k in _sunday_cut_points(h1):
+        cut = h1.time.iloc[k]
+        try:
+            _assert_tail_equal(full, _condition_frame(strat, _prepare(h1, cut, merge=merge)), cut, tail=4)
+        except AssertionError:
+            bad += 1
+    return bad
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_no_lookahead_with_sunday_bars_merged(name):
+    """日曜足の統合を含むデータ準備全体で、各時点の判定がその時点のデータだけで決まる。"""
+    assert _sunday_lookahead_diffs(name, merge_sunday_bars) == 0
+
+
+def test_sunday_lookahead_check_detects_mislabeled_merge():
+    """検査の検出力の確認: 月曜足を日曜 0 時に付け替える誤った統合（月曜の値が月曜中に見えてしまう）を検出する。"""
+    def wrong_merge(df, tf):
+        if tf not in ("H4", "D1"):
+            return df, 0
+        t = df["time"]
+        is_mon_first = (t.dt.dayofweek == 0) & (t.dt.hour == 0)
+        has_sun = (t - pd.Timedelta(hours=4 if tf == "H4" else 24)).isin(t[t.dt.dayofweek == 6])
+        key = t.where(~(is_mon_first & has_sun), t - pd.Timedelta(hours=4 if tf == "H4" else 24))
+        agg = {"open": "first", "high": "max", "low": "min", "close": "last",
+               "tick_volume": "sum", "spread": "min", "real_volume": "sum"}
+        return df.drop(columns="time").groupby(key.rename("time")).agg(agg).reset_index(), 0
+    assert sum(_sunday_lookahead_diffs(n, wrong_merge) for n in NAMES) > 0

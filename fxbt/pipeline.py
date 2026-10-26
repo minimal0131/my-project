@@ -12,6 +12,7 @@ import pandas as pd
 import yaml
 
 from .backtest.costs import CostModel
+from .data.resample import merge_sunday_bars
 from .data.validation import DataValidationError, validate_dataset
 from .metrics import compute_metrics, yearly_breakdown
 from .mtf import MarketData
@@ -44,7 +45,13 @@ def run(cfg: dict, frames: dict[str, pd.DataFrame], metas: dict[str, dict] | Non
     if not vreport.ok:
         raise DataValidationError(vreport)
 
-    md = MarketData(frames["H1"], frames["H4"], frames["D1"])
+    # 検査は取得したままのデータで行い、日曜の H4/D1 足（夏時間のずれる週の 1 時間分）は検査後に月曜足へ統合する
+    h4, n_sun_h4 = merge_sunday_bars(frames["H4"], "H4")
+    d1, n_sun_d1 = merge_sunday_bars(frames["D1"], "D1")
+    merged_sunday = {"H4": n_sun_h4, "D1": n_sun_d1}
+    if n_sun_h4 or n_sun_d1:
+        log.info("日曜足を月曜足に統合: H4 %d 本 / D1 %d 本", n_sun_h4, n_sun_d1)
+    md = MarketData(frames["H1"], h4, d1)
     costs = CostModel.from_config(cfg)
     per, st = cfg["periods"], cfg.get("stats", {})
     dev_s, dev_e = pd.Timestamp(per["development_start"]), end_of_day(per["development_end"])
@@ -162,13 +169,15 @@ def run(cfg: dict, frames: dict[str, pd.DataFrame], metas: dict[str, dict] | Non
 
     summary_df = pd.DataFrame(summary_rows)
     write_csv(summary_df, out / "summary.csv")
-    _write_report(out, cfg, vreport, summary_df, sections, synthetic, evaluate_holdout, n_hyp, alpha, costs)
+    _write_report(out, cfg, vreport, summary_df, sections, synthetic, evaluate_holdout, n_hyp, alpha, costs,
+                  merged_sunday)
     log.info("出力先: %s", out)
     return out
 
 
 def _write_report(out: Path, cfg: dict, vreport, summary: pd.DataFrame, sections: list[str], synthetic: bool,
-                  evaluate_holdout: bool, n_hyp: int, alpha: float, costs: CostModel) -> None:
+                  evaluate_holdout: bool, n_hyp: int, alpha: float, costs: CostModel,
+                  merged_sunday: dict[str, int] | None = None) -> None:
     per, wf, c = cfg["periods"], cfg["walkforward"], cfg["costs"]
     lines = ["# USD/JPY スイング戦略 検証レポート", ""]
     if synthetic:
@@ -191,6 +200,8 @@ def _write_report(out: Path, cfg: dict, vreport, summary: pd.DataFrame, sections
         f"- 執行: シグナル足の次の H1 始値で約定、同一足で損切り・利確が両方到達した場合は損切り、"
         f"決済後 {cfg['backtest'].get('cooldown_bars', 0)} 本は新規エントリーなし",
         f"- データ検査: {'合格' if vreport.ok else '不合格'}（警告 {sum(i.level == 'WARNING' for i in vreport.issues)} 件）",
+        f"- 日曜足の統合: H4 {(merged_sunday or {}).get('H4', 0)} 本 / D1 {(merged_sunday or {}).get('D1', 0)} 本を"
+        "直後の月曜足に統合（夏時間のずれる週の 1 時間分。H1 はそのまま）",
         "",
         "## 結論", "",
         f"判定基準: ウォークフォワードの取引が 30 回以上、期待値 > 0、Bonferroni 補正（×{n_hyp}）後の p 値 < {alpha}。"

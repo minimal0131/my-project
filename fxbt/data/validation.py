@@ -7,7 +7,9 @@
   * 異常な変動率・出来高 0 の足
   * 欠損（週末・指定休場日以外の空白）とデータ期間のカバー率
   * 形成中の足が混入していないか
-  * タイムゾーン（週明けの寄り付きが UTC で日曜夜になっているか、日足の本数/週）
+  * タイムゾーン（週明けの寄り付きが UTC で日曜夜になっているか、寄り付き・引けが NY 17 時に一致するか、
+    日足の本数/週）
+  * 日曜の足（夏時間のずれる週の寄り付き以降の足だけを許容）
   * 時間足間の整合性（H4/D1 と H1 集計の比較）
 """
 from __future__ import annotations
@@ -88,6 +90,19 @@ def server_to_utc(times: pd.Series, tz_spec: str) -> pd.Series:
         return ny.dt.tz_convert("UTC")
     tz = parse_timezone(tz_spec)
     return times.dt.tz_localize(tz, ambiguous="NaT", nonexistent="NaT").dt.tz_convert("UTC")
+
+
+def utc_to_server(times: pd.Series, tz_spec: str) -> pd.Series:
+    """UTC（タイムゾーン付き）をサーバー時刻（タイムゾーン無し）に変換する。server_to_utc の逆。"""
+    if tz_spec.strip().upper() == NY_CLOSE:
+        return times.dt.tz_convert("America/New_York").dt.tz_localize(None) + pd.Timedelta(hours=7)
+    return times.dt.tz_convert(parse_timezone(tz_spec)).dt.tz_localize(None)
+
+
+def ny_sunday_open_server(sundays: pd.Series, tz_spec: str) -> pd.Series:
+    """各日曜（サーバー時刻の日付）について、NY 日曜 17 時の寄り付きをサーバー時刻で返す。"""
+    ny = (sundays.dt.normalize() + pd.Timedelta(hours=17)).dt.tz_localize("America/New_York")
+    return utc_to_server(ny.dt.tz_convert("UTC"), tz_spec)
 
 
 # ---------------------------------------------------------------- 休場日
@@ -262,6 +277,25 @@ def check_timezone(h1: pd.DataFrame, d1: pd.DataFrame | None, tz_spec: str, vcfg
         elif plausible < 0.9:
             report.add("WARNING", "H1", "timezone", f"週明けの寄り付き時刻が想定と異なる週が {1 - plausible:.0%}")
 
+        # 厳密な照合: 寄り付き = NY 日曜 17 時、引け（週最後の足の終了時刻）= NY 金曜 17 時
+        # 米国と欧州の夏時間がずれる週で、server_timezone が業者と違えば 1 時間ずれて不一致になる
+        is_open = (t.diff() > pd.Timedelta(hours=48)).to_numpy()
+        is_close = np.roll(is_open, -1)
+        is_close[-1] = False
+        ny_open = utc[is_open].dropna().dt.tz_convert("America/New_York")
+        close_end = server_to_utc(t[is_close] + TF_DURATION["H1"], tz_spec).dropna().dt.tz_convert("America/New_York")
+        open_ratio = float(((ny_open.dt.dayofweek == 6) & (ny_open.dt.hour == 17) & (ny_open.dt.minute == 0)).mean())
+        close_ratio = float(((close_end.dt.dayofweek == 4) & (close_end.dt.hour == 17)
+                             & (close_end.dt.minute == 0)).mean())
+        report.stats["week_open_ny17_ratio"] = round(open_ratio, 3)
+        report.stats["week_close_ny17_ratio"] = round(close_ratio, 3)
+        min_match = vcfg.get("min_week_session_match_ratio", 0.95)
+        if min(open_ratio, close_ratio) < min_match:
+            report.add("WARNING", "H1", "timezone",
+                       f"週の寄り付きが NY 日曜 17 時に一致する週 {open_ratio:.1%}、引けが NY 金曜 17 時に一致する週 "
+                       f"{close_ratio:.1%}（下限 {min_match:.0%}）。server_timezone が業者の夏時間の扱いと"
+                       "合っているか確認してください")
+
     if d1 is not None and len(d1) > 20:
         per_week = d1.groupby(d1["time"].dt.to_period("W"))["time"].count()
         typical = int(per_week.iloc[1:-1].median()) if len(per_week) > 2 else int(per_week.median())
@@ -271,6 +305,36 @@ def check_timezone(h1: pd.DataFrame, d1: pd.DataFrame | None, tz_spec: str, vcfg
             report.add("ERROR", "D1", "timezone",
                        f"日足が週 {typical} 本（想定 {expected} 本）。日曜足のあるブローカーは日足の意味が変わるため、"
                        "設定 expected_daily_bars_per_week とサーバー時刻を確認してください")
+
+
+def check_sunday_bars(frames: dict[str, pd.DataFrame], tz_spec: str, report: ValidationReport) -> None:
+    """日曜の足は「NY 日曜 17 時の寄り付きがサーバー時刻の日曜に入る週」の、寄り付き以降を含む足だけを許容する。
+
+    欧州の夏時間に連動するサーバーでは、米国と欧州の夏時間がずれる週だけ寄り付きが日曜 23 時になり、
+    H1 23 時・H4 20 時・D1 0 時の日曜足ができる。それ以外の日曜足（寄り付き前の足、ずれの無い週の足、
+    NY+7 のサーバーでの日曜足）は時刻の解釈の誤りかデータの異常なので停止する。
+    """
+    for tf, df in frames.items():
+        t = df["time"]
+        sun = t[t.dt.dayofweek == 6]
+        if sun.empty:
+            report.stats[f"{tf}_sunday_bars"] = 0
+            continue
+        try:
+            open_srv = ny_sunday_open_server(sun, tz_spec)
+        except Exception as e:  # noqa: BLE001
+            report.add("ERROR", tf, "sunday", f"server_timezone '{tz_spec}' で寄り付き時刻を計算できません: {e}")
+            continue
+        ok = (sun + TF_DURATION[tf] > open_srv) & (open_srv < sun.dt.normalize() + pd.Timedelta(days=1))
+        report.stats[f"{tf}_sunday_bars"] = len(sun)
+        if (~ok).any():
+            report.add("ERROR", tf, "sunday",
+                       f"説明のつかない日曜の足が {int((~ok).sum())} 本（例 {sun[~ok].iloc[0]}）。"
+                       f"server_timezone '{tz_spec}' と業者の時刻を確認してください")
+        if ok.any():
+            report.add("INFO", tf, "sunday",
+                       f"夏時間のずれる週の日曜足 {int(ok.sum())} 本（NY 17 時の寄り付きがサーバーの日曜に入る週）。"
+                       + ("検証では直後の月曜足に統合する" if tf != "H1" else "H1 はそのまま使う"))
 
 
 # ---------------------------------------------------------------- 時間足間の整合性
@@ -314,6 +378,7 @@ def validate_dataset(frames: dict[str, pd.DataFrame], cfg: dict, metas: dict[str
         return report  # 単一時間足が壊れていれば以降の比較は意味がない
     if "H1" in frames:
         check_timezone(frames["H1"], frames.get("D1"), cfg["data"]["server_timezone"], vcfg, report)
+        check_sunday_bars(frames, cfg["data"]["server_timezone"], report)
         for tf in ("H4", "D1"):
             if tf in frames:
                 check_cross_timeframe(frames["H1"], frames[tf], tf, cfg["pip_size"], vcfg, report)

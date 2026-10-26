@@ -4,8 +4,10 @@ import pandas as pd
 import pytest
 
 from fxbt.config import load_config
+from fxbt.data.resample import merge_sunday_bars
 from fxbt.data.validation import (DataValidationError, ValidationReport, check_bars, check_cross_timeframe,
-                                  check_timezone, good_friday, parse_timezone, server_to_utc, validate_dataset)
+                                  check_sunday_bars, check_timezone, good_friday, parse_timezone, server_to_utc,
+                                  utc_to_server, validate_dataset)
 from fxbt.synthetic import make_all
 
 
@@ -216,3 +218,91 @@ def test_ny_close_timezone_follows_us_dst():
     assert server_to_utc(t, "Europe/Athens").dt.hour.iloc[1] == 22  # 欧州連動だと 3/15 はまだ GMT+2
     # サーバーの 0 時は常に NY の 17 時
     assert (u.dt.tz_convert("America/New_York").dt.hour == 17).all()
+
+
+# ------------------------------------------------------------------ 日曜足（欧州の夏時間に連動するサーバー）
+def _with_sunday_bar(frames, sunday_time, tf_hours={"H1": 23, "H4": 20, "D1": 0}):
+    """各時間足に日曜の足を 1 本足す（夏時間のずれる週に XM が作る 1 時間分の足を模したもの）。"""
+    out = {}
+    day = pd.Timestamp(sunday_time).normalize()
+    for tf, df in frames.items():
+        row = df.iloc[[0]].copy()
+        row["time"] = day + pd.Timedelta(hours=tf_hours[tf]) if tf != "H1" else pd.Timestamp(sunday_time)
+        out[tf] = pd.concat([df, row]).sort_values("time").reset_index(drop=True)
+    return out
+
+
+def test_sunday_bars_in_dst_mismatch_week_allowed_for_eu_server(frames):
+    # 2019-03-10: 米国は夏時間入り、欧州は 3/31 まで冬時間 → NY 日曜 17 時 = サーバー（欧州連動）日曜 23 時
+    fx = _with_sunday_bar(frames, "2019-03-10 23:00")
+    r = ValidationReport()
+    check_sunday_bars(fx, "Europe/Athens", r)
+    assert r.ok and r.stats["H1_sunday_bars"] == 1 and r.stats["D1_sunday_bars"] == 1
+    r = ValidationReport()
+    check_sunday_bars(fx, "NY+7", r)  # NY+7 のサーバーなら寄り付きは常に月曜 0 時で、日曜足は説明がつかない
+    assert len(_errors(r, "sunday")) == 3
+
+
+def test_sunday_bar_outside_mismatch_week_is_error(frames):
+    r = ValidationReport()
+    check_sunday_bars(_with_sunday_bar(frames, "2019-06-09 23:00"), "Europe/Athens", r)
+    assert len(_errors(r, "sunday")) == 3
+
+
+def test_sunday_bar_before_market_open_is_error(frames):
+    fx = {"H1": _with_sunday_bar(frames, "2019-03-10 22:00")["H1"]}
+    r = ValidationReport()
+    check_sunday_bars(fx, "Europe/Athens", r)
+    assert _errors(r, "sunday")
+
+
+def test_no_sunday_bars_passes(frames):
+    r = ValidationReport()
+    check_sunday_bars(frames, "Europe/Athens", r)
+    assert r.ok and r.stats["H1_sunday_bars"] == 0
+
+
+def test_week_session_match_detects_wrong_dst_rule(cfg, frames):
+    # 合成データは月曜 0 時〜金曜 23 時（NY+7 の業者と同じ）。欧州連動と解釈すると、ずれる週で 1 時間ずれる
+    r = ValidationReport()
+    check_timezone(frames["H1"], frames["D1"], "NY+7", cfg["validation"], r)
+    assert r.stats["week_open_ny17_ratio"] == 1.0 and r.stats["week_close_ny17_ratio"] == 1.0
+    assert not [i for i in r.issues if i.level == "WARNING"]
+    r = ValidationReport()
+    check_timezone(frames["H1"], frames["D1"], "Europe/Athens", cfg["validation"], r)
+    assert r.stats["week_open_ny17_ratio"] < 0.95
+    assert [i for i in r.issues if i.level == "WARNING" and "NY 日曜 17 時" in i.message]
+
+
+def test_utc_to_server_inverts_server_to_utc():
+    t = pd.Series(pd.to_datetime(["2021-01-11 00:00", "2021-03-15 00:00", "2021-07-05 13:00", "2021-11-01 23:00"]))
+    for tz in ("NY+7", "Europe/Athens", "+02:00"):
+        assert (utc_to_server(server_to_utc(t, tz), tz) == t).all()
+
+
+def test_merge_sunday_bars_into_monday():
+    d1 = pd.DataFrame({
+        "time": pd.to_datetime(["2019-03-08", "2019-03-10", "2019-03-11", "2019-03-12"]),
+        "open": [110.0, 111.0, 111.1, 112.0], "high": [110.5, 111.9, 111.5, 112.5],
+        "low": [109.5, 110.9, 110.0, 111.5], "close": [110.2, 111.05, 111.4, 112.2],
+        "tick_volume": [1000, 50, 900, 800], "spread": [15, 30, 16, 15], "real_volume": [0, 0, 0, 0],
+    })
+    out, n = merge_sunday_bars(d1, "D1")
+    assert n == 1 and list(out.columns) == list(d1.columns)
+    assert list(out["time"]) == list(pd.to_datetime(["2019-03-08", "2019-03-11", "2019-03-12"]))
+    mon = out.iloc[1]
+    assert (mon.open, mon.high, mon.low, mon.close) == (111.0, 111.9, 110.0, 111.4)
+    assert mon.tick_volume == 950 and mon.spread == 16
+    assert out.iloc[[0, 2]].reset_index(drop=True).equals(d1.iloc[[0, 3]].reset_index(drop=True))
+
+
+def test_merge_sunday_bars_keeps_h1_and_relabels_lonely_sunday():
+    h1 = pd.DataFrame({"time": pd.to_datetime(["2019-03-10 23:00", "2019-03-11 00:00"]), "open": [1.0, 1.0],
+                       "high": [1.0, 1.0], "low": [1.0, 1.0], "close": [1.0, 1.0], "tick_volume": [1, 1],
+                       "spread": [1, 1], "real_volume": [0, 0]})
+    out, n = merge_sunday_bars(h1, "H1")
+    assert n == 0 and out.equals(h1)
+    # 直後の月曜足が無い場合は月曜 0 時の足として扱う（使えるようになる時刻が遅れるだけ）
+    h4 = h1.iloc[[0]].assign(time=pd.Timestamp("2019-03-10 20:00"))
+    out, n = merge_sunday_bars(h4, "H4")
+    assert n == 1 and out["time"].tolist() == [pd.Timestamp("2019-03-11 00:00")]
