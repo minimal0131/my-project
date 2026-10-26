@@ -5,5 +5,5 @@ __pycache__/
 .pytest_cache/
 .venv/
 # 取得した価格データと検証結果はリポジトリに含めない
-data/
+/data/
 results/
