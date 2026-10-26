@@ -183,8 +183,11 @@ def _write_report(out: Path, cfg: dict, vreport, summary: pd.DataFrame, sections
         f"学習期間の取引が {wf.get('min_train_trades', 30)} 回未満のパラメーターは不採用",
         f"- 取引コスト: スプレッド {c['spread_pips']} pips"
         + ("（足の spread 列との大きい方）" if c.get("use_bar_spread") else "")
-        + f"、スリッページ 片道 {c['slippage_pips']} pips、スワップ 買い {c.get('swap_long_pips_per_day', 0)} / "
-          f"売り {c.get('swap_short_pips_per_day', 0)} pips/日（水曜 3 倍）",
+        + f"、スリッページ 片道 {c['slippage_pips']} pips、スワップ "
+        + (f"期間別 {len(c['swap_schedule'])} 区間（直近 買い {c['swap_schedule'][-1]['long']} / "
+           f"売り {c['swap_schedule'][-1]['short']} pips/日）" if c.get("swap_schedule") else
+           f"買い {c.get('swap_long_pips_per_day', 0)} / 売り {c.get('swap_short_pips_per_day', 0)} pips/日")
+        + "（水曜 3 倍）",
         f"- 執行: シグナル足の次の H1 始値で約定、同一足で損切り・利確が両方到達した場合は損切り、"
         f"決済後 {cfg['backtest'].get('cooldown_bars', 0)} 本は新規エントリーなし",
         f"- データ検査: {'合格' if vreport.ok else '不合格'}（警告 {sum(i.level == 'WARNING' for i in vreport.issues)} 件）",

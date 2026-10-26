@@ -126,3 +126,23 @@ def test_swap_included_in_trade_pnl():
 def test_bar_spread_option():
     cm = CostModel(pip=0.01, point=0.001, spread_pips=0.3, use_bar_spread=True)
     assert np.allclose(cm.spread_prices(np.array([1, 10])), [0.003, 0.010])
+
+
+def test_swap_schedule_by_period():
+    cm = CostModel(swap_long_pips_per_day=9.0, swap_short_pips_per_day=-9.0,
+                   swap_schedule=((pd.Timestamp("2020-01-01"), 0.5, -1.0), (pd.Timestamp("2021-03-04"), 2.0, -3.0)))
+    assert cm.swap_rate(1, pd.Timestamp("2019-06-01")) == 9.0   # 表の開始前は固定値
+    assert cm.swap_rate(1, pd.Timestamp("2020-06-01")) == 0.5
+    assert cm.swap_rate(-1, pd.Timestamp("2021-03-04")) == -3.0
+    # 火曜 10 時 -> 金曜 10 時: 火(1, 0.5) + 水(3, 0.5) + 木 3/4(1, 2.0) = 4.0
+    assert cm.swap_pips(1, pd.Timestamp("2021-03-02 10:00"), pd.Timestamp("2021-03-05 10:00")) == pytest.approx(4.0)
+
+
+def test_swap_schedule_from_config():
+    from fxbt.config import load_config
+    cm = CostModel.from_config(load_config("config/default.yaml"))
+    assert len(cm.swap_schedule) >= 5
+    starts = [s for s, _, _ in cm.swap_schedule]
+    assert starts == sorted(starts)
+    assert cm.swap_rate(1, pd.Timestamp("2023-06-01")) > cm.swap_rate(1, pd.Timestamp("2016-06-01"))
+    assert all(sh < 0 for _, _, sh in cm.swap_schedule)

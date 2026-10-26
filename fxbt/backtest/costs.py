@@ -17,6 +17,8 @@ class CostModel:
     swap_long_pips_per_day: float = 0.0
     swap_short_pips_per_day: float = 0.0
     triple_swap_weekday: int = 2
+    # 期間別スワップ ((開始日, 買い pips/日, 売り pips/日), ...) 開始日の昇順。空なら上の固定値を使う
+    swap_schedule: tuple = ()
 
     @classmethod
     def from_config(cls, cfg: dict) -> "CostModel":
@@ -28,7 +30,19 @@ class CostModel:
             swap_long_pips_per_day=c.get("swap_long_pips_per_day", 0.0),
             swap_short_pips_per_day=c.get("swap_short_pips_per_day", 0.0),
             triple_swap_weekday=c.get("triple_swap_weekday", 2),
+            swap_schedule=tuple(sorted((pd.Timestamp(r["from"]), float(r["long"]), float(r["short"]))
+                                       for r in (c.get("swap_schedule") or []))),
         )
+
+    def swap_rate(self, direction: int, day: pd.Timestamp) -> float:
+        """その日のロールオーバーに適用する 1 日分のスワップ（pips）。"""
+        long_, short_ = self.swap_long_pips_per_day, self.swap_short_pips_per_day
+        for start, lg, sh in self.swap_schedule:
+            if day >= start:
+                long_, short_ = lg, sh
+            else:
+                break
+        return long_ if direction > 0 else short_
 
     @property
     def slippage(self) -> float:
@@ -47,20 +61,26 @@ class CostModel:
         ロールオーバーは平日（月〜金）の終わりに 1 回、triple_swap_weekday の日は 3 回分。
         週末をまたぐ分は水曜の 3 倍で計上される（1 週間で 7 日分）。
         """
-        per_day = self.swap_long_pips_per_day if direction > 0 else self.swap_short_pips_per_day
-        if per_day == 0:
-            return 0.0
-        return per_day * rollover_days(entry_time, exit_time, self.triple_swap_weekday)
+        total = 0.0
+        for day, n in rollover_events(entry_time, exit_time, self.triple_swap_weekday):
+            total += n * self.swap_rate(direction, day)
+        return total
+
+
+def rollover_events(entry_time: pd.Timestamp, exit_time: pd.Timestamp, triple_weekday: int = 2
+                    ) -> list[tuple[pd.Timestamp, int]]:
+    """保有中のロールオーバー [(終わった日, 日数), ...]。"""
+    first = pd.Timestamp(entry_time).normalize() + pd.Timedelta(days=1)
+    last = pd.Timestamp(exit_time).normalize()
+    out = []
+    if last < first:
+        return out
+    for midnight in pd.date_range(first, last, freq="D"):
+        day = midnight - pd.Timedelta(days=1)
+        if day.dayofweek < 5:
+            out.append((day, 3 if day.dayofweek == triple_weekday else 1))
+    return out
 
 
 def rollover_days(entry_time: pd.Timestamp, exit_time: pd.Timestamp, triple_weekday: int = 2) -> int:
-    first = pd.Timestamp(entry_time).normalize() + pd.Timedelta(days=1)
-    last = pd.Timestamp(exit_time).normalize()
-    if last < first:
-        return 0
-    days = 0
-    for midnight in pd.date_range(first, last, freq="D"):
-        wd = (midnight - pd.Timedelta(days=1)).dayofweek  # 終わった日の曜日
-        if wd < 5:
-            days += 3 if wd == triple_weekday else 1
-    return days
+    return sum(n for _, n in rollover_events(entry_time, exit_time, triple_weekday))

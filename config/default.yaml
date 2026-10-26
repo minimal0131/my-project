@@ -16,9 +16,11 @@ data:
   timeframes: [H1, H4, D1]
   start: "2015-01-01"
   end: "2025-12-31"
-  # サーバー時刻のタイムゾーン（ブローカー依存）。多くの MT5 業者は NY クローズ基準 (UTC+2/+3)。
-  # 固定オフセット "+02:00" または IANA 名（例 "Etc/GMT-2", "Europe/Athens"）を指定。
-  server_timezone: "Europe/Athens"
+  # サーバー時刻のタイムゾーン（ブローカー依存）。
+  # "NY+7" = NY クローズ基準（冬 GMT+2 / 夏 GMT+3、米国の夏時間に連動）。MT5 業者で主流。
+  #   サーバーの 0 時が常に NY の 17 時になり、日足は週 5 本（日曜足なし）。
+  # その他: 固定オフセット "+02:00"、IANA 名 "Europe/Athens"（欧州の夏時間に連動する業者）など。
+  server_timezone: "NY+7"
 
 validation:
   min_bars:
@@ -26,7 +28,9 @@ validation:
     H4: 1500
     D1: 300
   max_intraweek_gap_hours: 4        # 週末以外でこれを超える空白は「欠損」
-  allowed_gap_dates: ["12-25", "01-01"]  # この月日を含む空白は休場として許容
+  # 休場・短縮取引として欠落を許容する日（許容するだけで、取引があってもエラーにはならない）。
+  # 一般的な NY クローズ業者: 12/25・1/1 は休場、12/24・12/31 は早仕舞い、聖金曜日は休場または薄商い。
+  allowed_gap_dates: ["12-24", "12-25", "12-31", "01-01", "good_friday"]
   max_gap_events: 20                # 欠損がこれを超えたら停止
   max_single_gap_hours: 30          # 1 回の欠落（平日分）がこれを超えたら停止
   max_abs_return: 0.05              # 1 本で 5% を超える変動は異常値として停止
@@ -36,12 +40,30 @@ validation:
   expected_daily_bars_per_week: 5   # 6 なら日曜足があるブローカー（時刻設定を要確認）
 
 costs:
-  spread_pips: 0.3
-  use_bar_spread: false      # true なら max(固定, 足の spread 列) を使う
-  slippage_pips: 0.2         # エントリー・決済それぞれに不利方向へ
-  swap_long_pips_per_day: 1.5
-  swap_short_pips_per_day: -2.5
-  triple_swap_weekday: 2     # 0=月 ... 2=水
+  # 想定: 一般的な MT5 業者のスタンダード口座（取引手数料なし、スプレッドに上乗せ）。
+  # ECN/RAW 口座なら spread_pips を「RAW スプレッド + 往復手数料の pips 換算」にする
+  #   （例: 0.2 pips + $7/lot 往復 ≒ 1.0 pips → 1.2）。
+  spread_pips: 1.2           # 平時の USDJPY 平均（指標時・早朝は別途 use_bar_spread で反映）
+  use_bar_spread: true       # max(固定, 足の spread 列)。ロールオーバー前後の拡大を反映する
+  slippage_pips: 0.3         # エントリー・決済（成行）それぞれに不利方向へ
+  triple_swap_weekday: 2     # 水曜 3 倍（0=月 ... 2=水）
+  # スワップ（1 lot・1 日あたり pips、買い/売り）。日米金利差の変化に合わせた期間別の概算値。
+  # 業者の取り分を差し引いた一般的な水準で、実際の値は業者ごとに異なる。
+  # 取得時に data/raw/*.meta.json の symbol_info（swap_long/swap_short/swap_mode）で現在値を確認できる。
+  swap_schedule:
+    - {from: "2015-01-01", long: 0.2, short: -0.6}   # FF 0〜0.5%
+    - {from: "2017-01-01", long: 0.5, short: -0.9}   # FF 0.75〜1.5%
+    - {from: "2018-01-01", long: 0.9, short: -1.4}   # FF 1.5〜2.5%
+    - {from: "2019-08-01", long: 0.5, short: -1.0}   # 利下げ局面
+    - {from: "2020-03-16", long: -0.1, short: -0.4}  # FF 0%
+    - {from: "2022-04-01", long: 0.8, short: -1.4}   # 利上げ開始
+    - {from: "2022-10-01", long: 1.5, short: -2.3}   # FF 3〜4%
+    - {from: "2023-03-01", long: 1.9, short: -2.8}   # FF 4.75〜5.5%
+    - {from: "2024-10-01", long: 1.5, short: -2.4}   # 利下げ・日銀利上げ
+    - {from: "2025-02-01", long: 1.2, short: -2.1}   # FF 4%台、日銀 0.5%
+  # swap_schedule が無い場合の固定値
+  swap_long_pips_per_day: 1.2
+  swap_short_pips_per_day: -2.1
 
 backtest:
   execution_tf: H1

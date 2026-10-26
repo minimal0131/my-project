@@ -5,7 +5,7 @@ import pytest
 
 from fxbt.config import load_config
 from fxbt.data.validation import (DataValidationError, ValidationReport, check_bars, check_cross_timeframe,
-                                  check_timezone, parse_timezone, server_to_utc, validate_dataset)
+                                  check_timezone, good_friday, parse_timezone, server_to_utc, validate_dataset)
 from fxbt.synthetic import make_all
 
 
@@ -103,11 +103,28 @@ def test_long_single_gap_is_error(cfg, frames):
 
 def test_missing_full_weekday_next_to_weekend(cfg, frames):
     h1 = frames["H1"]
-    cut = h1["time"].dt.normalize() == pd.Timestamp("2019-04-19")  # 金曜が丸ごと欠落（祝日休場など）
+    cut = h1["time"].dt.normalize() == pd.Timestamp("2019-05-10")  # 祝日ではない金曜が丸ごと欠落
     r = ValidationReport()
     check_bars(h1[~cut].reset_index(drop=True), "H1", cfg["validation"], r)
     assert r.stats["H1_gap_events"] == 1 and r.stats["H1_longest_gap_hours"] == 24
     assert r.ok  # 24 時間 <= 30 時間なので警告のみ
+
+
+def test_good_friday_gap_is_allowed(cfg, frames):
+    h1 = frames["H1"]
+    cut = h1["time"].dt.normalize().isin([pd.Timestamp("2019-04-19"), pd.Timestamp("2020-04-10")])
+    r = ValidationReport()
+    check_bars(h1[~cut].reset_index(drop=True), "H1", cfg["validation"], r)
+    assert r.stats["H1_gap_events"] == 0
+    vcfg = dict(cfg["validation"], allowed_gap_dates=["12-25", "01-01"])
+    r = ValidationReport()
+    check_bars(h1[~cut].reset_index(drop=True), "H1", vcfg, r)
+    assert r.stats["H1_gap_events"] == 2
+
+
+def test_good_friday_dates():
+    assert [good_friday(y).strftime("%Y-%m-%d") for y in (2016, 2019, 2024, 2025)] == \
+        ["2016-03-25", "2019-04-19", "2024-03-29", "2025-04-18"]
 
 
 def test_allowed_holiday_gap_is_ignored(cfg, frames):
@@ -148,6 +165,9 @@ def test_wrong_timezone_is_error(cfg, frames):
     r = ValidationReport()
     check_timezone(frames["H1"], frames["D1"], "Europe/Athens", cfg["validation"], r)
     assert r.ok
+    r = ValidationReport()
+    check_timezone(frames["H1"], frames["D1"], "NY+7", cfg["validation"], r)
+    assert r.ok
 
 
 def test_sunday_daily_bars_detected(cfg, frames):
@@ -185,3 +205,14 @@ def test_timezone_parsing():
     t = pd.Series(pd.to_datetime(["2020-01-06 00:00", "2020-07-06 00:00"]))
     u = server_to_utc(t, "Europe/Athens")
     assert list(u.dt.hour) == [22, 21]  # 冬 UTC+2, 夏 UTC+3
+
+
+def test_ny_close_timezone_follows_us_dst():
+    # 2021-03-15(月): 米国は 3/14 に夏時間入り、欧州はまだ冬時間
+    t = pd.Series(pd.to_datetime(["2021-01-11 00:00", "2021-03-15 00:00", "2021-07-05 00:00",
+                                  "2021-11-01 00:00", "2021-11-08 00:00"]))
+    u = server_to_utc(t, "NY+7")
+    assert list(u.dt.hour) == [22, 21, 21, 21, 22]  # 冬 GMT+2 / 夏 GMT+3（米国の切替日に連動）
+    assert server_to_utc(t, "Europe/Athens").dt.hour.iloc[1] == 22  # 欧州連動だと 3/15 はまだ GMT+2
+    # サーバーの 0 時は常に NY の 17 時
+    assert (u.dt.tz_convert("America/New_York").dt.hour == 17).all()
