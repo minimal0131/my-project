@@ -146,3 +146,46 @@ def test_swap_schedule_from_config():
     assert starts == sorted(starts)
     assert cm.swap_rate(1, pd.Timestamp("2023-06-01")) > cm.swap_rate(1, pd.Timestamp("2016-06-01"))
     assert all(sh < 0 for _, _, sh in cm.swap_schedule)
+
+
+def test_spread_cost_recorded_on_the_bar_where_it_is_paid():
+    # 約定足と決済足でスプレッドが違う: 買いは約定足、売りは決済足（ASK で買い戻す足）の値を記録する
+    cm = CostModel(pip=0.01, point=0.001, spread_pips=0.0, use_bar_spread=True, slippage_pips=0.5)
+    h1 = bars([100.0] * 10)
+    h1["spread"] = [10, 10, 10, 10, 30, 30, 30, 30, 30, 30]  # 1.0 pips -> 3.0 pips
+    for d in (1, -1):
+        t = run_backtest(h1, signals_at(h1, {0: d}, sl=5, tp=5, hold=3), cm).iloc[0]
+        assert t.exit_reason == "time" and t.exit_time == h1.time[4]
+        assert t.spread_cost_pips == pytest.approx(1.0 if d > 0 else 3.0)
+        # 価格は不変なので、値幅 = −(スプレッド + スリッページ)
+        assert t.price_pips == pytest.approx(-(t.spread_cost_pips + t.slippage_cost_pips))
+
+
+def test_swap_not_charged_for_exit_inside_23h_bar():
+    # 水曜 22 時に約定し、23 時の足の途中で損切り -> 0 時のロールオーバー前に決済しているのでスワップなし
+    cm = CostModel(pip=0.01, spread_pips=0, slippage_pips=0, swap_long_pips_per_day=1.0)
+    h1 = ohlc([(100, 100, 100, 100), (100, 100, 100, 100), (100, 100, 100, 100), (100, 100, 99, 99),
+               (99, 99, 99, 99)], start="2021-03-03 20:00")  # 水曜。23 時の足で損切り
+    t = run_backtest(h1, signals_at(h1, {1: 1}, sl=0.5, tp=5), cm).iloc[0]
+    assert t.entry_time == pd.Timestamp("2021-03-03 22:00") and t.exit_reason == "stop"
+    assert t.exit_time == pd.Timestamp("2021-03-04 00:00") and t.hold_hours == 2  # 記録は足の終了時刻のまま
+    assert t.swap_pips == 0.0
+
+
+def test_swap_charged_for_exit_at_midnight_open():
+    # 0 時の足の始値での決済はロールオーバー後なので、水曜分（3 倍）を計上する
+    cm = CostModel(pip=0.01, spread_pips=0, slippage_pips=0, swap_long_pips_per_day=1.0)
+    h1 = bars([100.0] * 6, start="2021-03-03 20:00")
+    t = run_backtest(h1, signals_at(h1, {1: 1}, sl=5, tp=5, hold=2), cm).iloc[0]
+    assert t.exit_reason == "time" and t.exit_time == pd.Timestamp("2021-03-04 00:00")
+    assert t.swap_pips == 3.0
+
+
+def test_swap_not_charged_for_period_end_at_friday_close():
+    # 評価期間の最終足（金曜 23 時）の終値で強制決済 -> 金曜のロールオーバーは通過していない
+    cm = CostModel(pip=0.01, spread_pips=0, slippage_pips=0, swap_long_pips_per_day=1.0)
+    h1 = bars([100.0] * 30, start="2021-03-04 18:00")  # 木曜 18 時 〜
+    end = pd.Timestamp("2021-03-05 23:00")
+    t = run_backtest(h1, signals_at(h1, {0: 1}, sl=5, tp=5), cm, end=end).iloc[0]
+    assert t.exit_reason == "period_end" and t.exit_time == pd.Timestamp("2021-03-06 00:00")
+    assert t.swap_pips == 1.0  # 木曜分だけ

@@ -141,6 +141,28 @@ def compute_metrics(trades: pd.DataFrame, bootstrap_samples: int = 5000, seed: i
     }
 
 
+COST_BREAKDOWN_COLUMNS = ["n_trades", "gross_pips", "spread_pips", "slippage_pips", "swap_pips", "net_pips",
+                          "expectancy_pips", "gross_expectancy_pips", "net_minus_gross_pips"]
+
+
+def cost_breakdown(trades: pd.DataFrame) -> dict:
+    """損益の内訳（pips）。net = gross − spread − slippage + swap が取引ごとに成り立つ。
+
+    gross（コスト前）は BID 基準の値幅 = price_pips + スプレッド + スリッページ。
+    """
+    if trades is None or trades.empty:
+        return {k: (0 if k == "n_trades" else float("nan")) for k in COST_BREAKDOWN_COLUMNS}
+    n = len(trades)
+    spread = float(trades["spread_cost_pips"].sum())
+    slip = float(trades["slippage_cost_pips"].sum())
+    swap = float(trades["swap_pips"].sum())
+    gross = float(trades["price_pips"].sum()) + spread + slip
+    net = float(trades["pnl_pips"].sum())
+    return {"n_trades": n, "gross_pips": gross, "spread_pips": spread, "slippage_pips": slip, "swap_pips": swap,
+            "net_pips": net, "expectancy_pips": net / n, "gross_expectancy_pips": gross / n,
+            "net_minus_gross_pips": net - gross}
+
+
 def yearly_breakdown(trades: pd.DataFrame) -> pd.DataFrame:
     """全年の成績（良い年だけを選ばないよう、取引のない年も 0 件として残す）。"""
     if trades.empty:

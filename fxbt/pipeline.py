@@ -16,7 +16,8 @@ from .data.resample import merge_sunday_bars
 from .data.validation import DataValidationError, validate_dataset
 from .metrics import compute_metrics, yearly_breakdown
 from .mtf import MarketData
-from .report import LABELS, md_table, metrics_row, write_csv
+from .report import COST_LABELS, LABELS, md_table, metrics_row, write_csv
+from .sensitivity import run_sensitivity
 from .strategies import REGISTRY
 from .walkforward import StrategyRunner, ablation, end_of_day, param_grid, select_params, walk_forward
 
@@ -81,6 +82,11 @@ def run(cfg: dict, frames: dict[str, pd.DataFrame], metas: dict[str, dict] | Non
         wf_table, wf_trades = walk_forward(runner, cfg)
         m_wf = compute_metrics(wf_trades, n_boot, seed)
 
+        sens = None
+        if cfg.get("cost_sensitivity"):
+            log.info("戦略 %s: コスト感応度（ウォークフォワード検証窓のみ）", name)
+            sens = run_sensitivity(runner, wf_table, cfg)
+
         log.info("戦略 %s: 条件別アブレーション", name)
         abl = ablation(runner, dev_s, dev_e)
         abl_rows = []
@@ -122,6 +128,8 @@ def run(cfg: dict, frames: dict[str, pd.DataFrame], metas: dict[str, dict] | Non
         write_csv(wf_trades, out / f"trades_{name}_walkforward_oos.csv")
         write_csv(wf_table, out / f"walkforward_windows_{name}.csv")
         write_csv(abl_df, out / f"ablation_{name}.csv")
+        if sens is not None:
+            write_csv(sens, out / f"cost_sensitivity_{name}.csv")
         if evaluate_holdout:
             write_csv(ho_trades, out / f"trades_{name}_holdout.csv")
 
@@ -161,6 +169,18 @@ def run(cfg: dict, frames: dict[str, pd.DataFrame], metas: dict[str, dict] | Non
                                             if m_ho is not None else [wf_trades]))
         sec += ["### 年別（ウォークフォワード検証窓" + (" + ホールドアウト" if m_ho is not None else "") + "、全年）", "",
                 md_table(yearly, LABELS)]
+        if sens is not None:
+            cols = ["scenario", "method", "n_trades", "gross_pips", "spread_pips", "slippage_pips", "swap_pips",
+                    "net_pips", "expectancy_pips", "net_minus_gross_pips", "net_vs_base_pips"]
+            sec += ["### コスト感応度（ウォークフォワード検証窓・コストだけを変更）", "",
+                    "コスト前 = BID 基準の値幅。合計 = コスト前 − スプレッド − スリッページ + スワップ。"
+                    "シナリオの値は仮定・推定で、実績ではありません（根拠はレポート冒頭）。"
+                    "「パラメーター固定」は基準で各窓に選ばれたパラメーターをそのまま使い、"
+                    "「選び直し（参考）」はシナリオのコストで学習期間から選び直しています。"
+                    "損切り・利確の位置は約定価格からの距離なので、コストを変えると決済の結果も変わり、"
+                    "コスト前の値幅もシナリオごとに変わります。選び直しの結果が基準より良くなる場合は、"
+                    "コストの効果ではなくパラメーター選択のばらつきです。", "",
+                    md_table(sens[cols], COST_LABELS)]
         sec += ["### 条件別の有効性（開発期間・設定値から 1 条件ずつ変更）", "",
                 "期待値の差が小さい / 負の条件は、その条件が成績に寄与していない可能性を示す。"
                 "ただし開発期間内での比較なので、これを見て条件を選ぶと過剰適合になりうる。", "",
@@ -170,21 +190,28 @@ def run(cfg: dict, frames: dict[str, pd.DataFrame], metas: dict[str, dict] | Non
     summary_df = pd.DataFrame(summary_rows)
     write_csv(summary_df, out / "summary.csv")
     _write_report(out, cfg, vreport, summary_df, sections, synthetic, evaluate_holdout, n_hyp, alpha, costs,
-                  merged_sunday)
+                  merged_sunday, metas)
     log.info("出力先: %s", out)
     return out
 
 
 def _write_report(out: Path, cfg: dict, vreport, summary: pd.DataFrame, sections: list[str], synthetic: bool,
                   evaluate_holdout: bool, n_hyp: int, alpha: float, costs: CostModel,
-                  merged_sunday: dict[str, int] | None = None) -> None:
+                  merged_sunday: dict[str, int] | None = None, metas: dict[str, dict] | None = None) -> None:
     per, wf, c = cfg["periods"], cfg["walkforward"], cfg["costs"]
+    meta = (metas or {}).get("H1") or next(iter((metas or {}).values()), {})
+    broker = (f"{meta['company']}（サーバー {meta.get('server') or '不明'}）" if meta.get("company")
+              else "不明（取得時の記録なし）")
+    bars_span = (f"、取得した H1 の範囲 {meta['first_bar']} 〜 {meta['last_bar']}"
+                 if meta.get("first_bar") and meta.get("last_bar") else "")
     lines = ["# USD/JPY スイング戦略 検証レポート", ""]
     if synthetic:
         lines += ["> ## ⚠ 合成データによる動作確認です", "> 実際の相場データではありません。この結果を戦略の評価に使わないでください。", ""]
     lines += [
         f"- 作成: {datetime.now():%Y-%m-%d %H:%M} / 設定ハッシュ `{config_hash(cfg)}`",
-        f"- データ: {cfg['symbol']} H1/H4/D1, {cfg['data']['start']} 〜 {cfg['data']['end']}（サーバー時刻 {cfg['data']['server_timezone']}）",
+        f"- 業者: {broker} / 銘柄: {cfg['symbol']}",
+        f"- データ: {cfg['symbol']} H1/H4/D1, {cfg['data']['start']} 〜 {cfg['data']['end']}{bars_span}"
+        f"（サーバー時刻 {cfg['data']['server_timezone']}）",
         f"- 開発期間: {per['development_start']} 〜 {per['development_end']}",
         f"- ホールドアウト: {per['holdout_start']} 〜 {per['holdout_end']}"
         + ("" if evaluate_holdout else "（**今回は未評価**。`--evaluate-holdout` で 1 回だけ評価）"),
@@ -197,6 +224,11 @@ def _write_report(out: Path, cfg: dict, vreport, summary: pd.DataFrame, sections
            f"売り {c['swap_schedule'][-1]['short']} pips/日）" if c.get("swap_schedule") else
            f"買い {c.get('swap_long_pips_per_day', 0)} / 売り {c.get('swap_short_pips_per_day', 0)} pips/日")
         + "（水曜 3 倍）",
+        *_swap_source_lines(c.get("swap_schedule") or [], cfg["data"]["end"]),
+        "- 足の spread 列はその足の中の最小スプレッドです（XM の 2022 年・2026 年のティックで確認。2016〜2021 年はティックが無く未確認）。"
+        "実際の約定時のスプレッドはこれより大きいことが多く、コストを低めに見積もっている可能性があります。",
+        "- 最大保有時間は暦時間（週末・休場を含む）で数えます。期限が週末にかかると次の取引可能な足の始値で決済するため、"
+        "記録上の保有時間は上限を超えることがあります。",
         f"- 執行: シグナル足の次の H1 始値で約定、同一足で損切り・利確が両方到達した場合は損切り、"
         f"決済後 {cfg['backtest'].get('cooldown_bars', 0)} 本は新規エントリーなし",
         f"- データ検査: {'合格' if vreport.ok else '不合格'}（警告 {sum(i.level == 'WARNING' for i in vreport.issues)} 件）",
@@ -240,8 +272,31 @@ def _write_report(out: Path, cfg: dict, vreport, summary: pd.DataFrame, sections
         "- 本ツールは実口座・デモ口座への発注機能を持ちません。",
         "",
     ]
+    scenarios = (cfg.get("cost_sensitivity") or {}).get("scenarios") or []
+    if scenarios:
+        lines += ["### コスト感応度のシナリオ（仮定・推定。実績ではありません）", ""]
+        lines += [f"- {sc['name']}: {sc.get('basis', '')}" for sc in scenarios] + [""]
     if vreport.issues:
         lines += ["## データ検査の検出事項", ""]
         lines += [f"- [{i.level}] {i.timeframe} `{i.check}`: {i.message}" for i in vreport.issues] + [""]
     lines += sections
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _swap_source_lines(schedule: list[dict], data_end) -> list[str]:
+    """スワップの期間ごとの出どころ（推定値かどうか）をレポート用にまとめる。"""
+    if not schedule:
+        return ["- スワップは固定値の仮定です（業者の実績ではありません）"]
+    rows = sorted(schedule, key=lambda r: pd.Timestamp(r["from"]))
+    out, i = [], 0
+    while i < len(rows):
+        src = rows[i].get("source", "estimate")
+        j = i
+        while j + 1 < len(rows) and rows[j + 1].get("source", "estimate") == src:
+            j += 1
+        end = (pd.Timestamp(rows[j + 1]["from"]) - pd.Timedelta(days=1)).date() if j + 1 < len(rows) else data_end
+        what = ("**推定値**（日米金利差から概算。業者の実績ではありません）" if src == "estimate"
+                else f"{src}（過去の実績ではありません）")
+        out.append(f"- スワップ {rows[i]['from']} 〜 {end}: {what}")
+        i = j + 1
+    return out

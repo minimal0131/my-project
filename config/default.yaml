@@ -55,23 +55,45 @@ costs:
   # スワップ（1 lot・1 日あたり pips、買い/売り）。日米金利差の変化に合わせた期間別の概算値。
   # 業者の取り分を差し引いた一般的な水準で、実際の値は業者ごとに異なる。
   # 取得時に data/raw/*.meta.json の symbol_info（swap_long/swap_short/swap_mode）で現在値を確認できる。
+  # source: estimate = 金利差からの推定値（XM の実績ではない）。それ以外の文字列はその値の出どころ（レポートに表示）。
   swap_schedule:
-    - {from: "2015-01-01", long: 0.2, short: -0.6}   # FF 0〜0.5%
-    - {from: "2017-01-01", long: 0.5, short: -0.9}   # FF 0.75〜1.5%
-    - {from: "2018-01-01", long: 0.9, short: -1.4}   # FF 1.5〜2.5%
-    - {from: "2019-08-01", long: 0.5, short: -1.0}   # 利下げ局面
-    - {from: "2020-03-16", long: -0.1, short: -0.4}  # FF 0%
-    - {from: "2022-04-01", long: 0.8, short: -1.4}   # 利上げ開始
-    - {from: "2022-10-01", long: 1.5, short: -2.3}   # FF 3〜4%
-    - {from: "2023-03-01", long: 1.9, short: -2.8}   # FF 4.75〜5.5%
-    - {from: "2024-10-01", long: 1.5, short: -2.4}   # 利下げ・日銀利上げ
-    - {from: "2025-02-01", long: 0.2, short: -3.0}   # FF 4%台、日銀 0.5%。XM の現在値（2026-10 取得: +0.21 / -2.96）
+    - {from: "2015-01-01", long: 0.2, short: -0.6, source: "estimate"}   # FF 0〜0.5%
+    - {from: "2017-01-01", long: 0.5, short: -0.9, source: "estimate"}   # FF 0.75〜1.5%
+    - {from: "2018-01-01", long: 0.9, short: -1.4, source: "estimate"}   # FF 1.5〜2.5%
+    - {from: "2019-08-01", long: 0.5, short: -1.0, source: "estimate"}   # 利下げ局面
+    - {from: "2020-03-16", long: -0.1, short: -0.4, source: "estimate"}  # FF 0%
+    - {from: "2022-04-01", long: 0.8, short: -1.4, source: "estimate"}   # 利上げ開始
+    - {from: "2022-10-01", long: 1.5, short: -2.3, source: "estimate"}   # FF 3〜4%
+    - {from: "2023-03-01", long: 1.9, short: -2.8, source: "estimate"}   # FF 4.75〜5.5%
+    - {from: "2024-10-01", long: 1.5, short: -2.4, source: "estimate"}   # 利下げ・日銀利上げ
+    - {from: "2025-02-01", long: 0.2, short: -3.0, source: "XM の 2026-10 時点の値を当てはめ"}   # FF 4%台、日銀 0.5%。XM の現在値（2026-10 取得: +0.21 / -2.96）
   # swap_schedule が無い場合の固定値
   swap_long_pips_per_day: 1.2
   swap_short_pips_per_day: -2.1
 
+cost_sensitivity:
+  # コストだけを変えたときの成績（開発期間のウォークフォワード検証窓のみ。ホールドアウトは使わない）。
+  # 値はすべて仮定・推定で、業者の実績ではない。足の spread 列は足の中の最小スプレッド（XM のティックで確認）。
+  # 根拠の数値は XM のティック（2022 年の各月 1 週 1,449 本、2026-09〜10 の 792 本）と H1 足の比較による。
+  reselect_params: true      # シナリオのコストでパラメーターを選び直したウォークフォワードも参考として出す
+  scenarios:
+    - {name: "スプレッド +0.5", spread_add_pips: 0.5,
+       basis: "推定: 足の始値時点のティックスプレッドは足の記録より 2022 年で中央値 +0.3・平均 +0.7 pips、2026 年で中央値 +0.5・平均 +1.0 pips"}
+    - {name: "スプレッド +1.0", spread_add_pips: 1.0,
+       basis: "推定: 同じ差の上位 10% 点が 2022 年・2026 年とも +1.1 pips"}
+    - {name: "足のスプレッド ×1.5", spread_mult: 1.5,
+       basis: "推定: 始値時点のティックスプレッド / 足の記録 の平均が 2022 年 1.41・2026 年 1.45"}
+    - {name: "スリッページ 0.5", slippage_pips: 0.5, basis: "仮定: 片道 0.3 → 0.5 pips（実約定の記録はない）"}
+    - {name: "スリッページ 1.0", slippage_pips: 1.0, basis: "仮定: 片道 1.0 pips（指標発表時などの悪い約定を想定）"}
+    - {name: "スワップ ×1.5", swap_mult: 1.5, basis: "仮定: 2025 年 1 月以前のスワップは推定値のため ±50% の幅を見る"}
+    - {name: "スワップ ×0.5", swap_mult: 0.5, basis: "仮定: 同上"}
+    - {name: "スプレッド +1.0・スリッページ 0.5", spread_add_pips: 1.0, slippage_pips: 0.5, basis: "仮定: 上の 2 つの組み合わせ"}
+
 backtest:
   execution_tf: H1
+  # 最大保有時間は暦時間（週末・休場を含む）で数える。期限が週末・休場にかかった場合は、次に取引できる足
+  # （通常は月曜 0 時）の始値で決済するので、記録上の保有時間は max_hold_hours を超えることがある
+  # （2016〜2022 の WF で最長 120 時間。その間の取引可能な H1 足は 69 本以下）。各戦略の max_hold_hours も同じ。
   max_hold_hours: 72         # 最大保有 3 日
   cooldown_bars: 4           # 決済後に新規エントリーを禁止する H1 本数
   same_bar_policy: stop_first  # 同一足で SL/TP 両到達時は SL 優先

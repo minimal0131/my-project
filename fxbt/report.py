@@ -13,6 +13,12 @@ LABELS = {
     "max_drawdown_pips": "最大DD(pips)", "avg_hold_hours": "平均保有(h)", "p_value": "p値",
     "year": "年", "window": "窓",
 }
+COST_LABELS = {
+    "scenario": "シナリオ", "method": "方式", "n_trades": "取引数", "gross_pips": "コスト前(pips)",
+    "spread_pips": "スプレッド(pips)", "slippage_pips": "スリッページ(pips)", "swap_pips": "スワップ(pips)",
+    "net_pips": "合計(pips)", "expectancy_pips": "期待値(pips)", "net_minus_gross_pips": "コスト前との差(pips)",
+    "net_vs_base_pips": "基準との差(pips)",
+}
 SUMMARY_KEYS = ["n_trades", "win_rate", "breakeven_win_rate", "avg_win_pips", "avg_loss_pips",
                 "expectancy_pips", "expectancy_r", "profit_factor", "total_pips", "max_drawdown_pips",
                 "avg_hold_hours", "p_value"]

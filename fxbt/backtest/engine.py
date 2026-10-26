@@ -7,6 +7,8 @@
       買いは BID で、売りは ASK で到達を判定
   * 各足では次の順に判定する
       1. 始値の時点で最大保有時間を超えていれば始値で成行決済
+         （最大保有時間は暦時間で数える。期限が週末・休場にかかれば次の取引可能な足の始値で決済するので、
+           記録上の保有時間は上限を超えうる。取引可能な時間で数える仕様ではない）
       2. 始値が損切りを越えて窓開け → 始値で決済（不利な約定）
          始値が利確を越えて窓開け → 利確価格で決済（有利な分は計上しない）
       3. 足の高安で損切り/利確に到達。両方到達した足は損切りを優先（保守的）
@@ -118,7 +120,9 @@ def run_backtest(h1: pd.DataFrame, signals: pd.DataFrame, costs: CostModel, *,
         # 始値での決済はその足の開始時刻、足の途中・終値での決済は足の終了時刻で記録する
         exit_time = pd.Timestamp(t[j]) + (pd.Timedelta(0) if at_open else pd.Timedelta(hours=1))
         price_pips = d * (exit_px - entry) / pip
-        swap = costs.swap_pips(d, entry_time, exit_time)
+        # スワップは実際に決済した時点までのロールオーバー（サーバー時刻 0 時）で数える。
+        # 足の途中・終値での決済は決済足の終了前（23 時の足なら 0 時より前）なので、決済足の開始時刻を使う
+        swap = costs.swap_pips(d, entry_time, pd.Timestamp(t[j]))
         pnl = price_pips + swap
         sl_pips = sl_d[i] / pip
         n_market = 2 if reason != "take_profit" else 1
@@ -129,7 +133,8 @@ def run_backtest(h1: pd.DataFrame, signals: pd.DataFrame, costs: CostModel, *,
             exit_reason=reason, hold_hours=(exit_time - entry_time) / pd.Timedelta(hours=1),
             sl_pips=sl_pips, tp_pips=tp_d[i] / pip, price_pips=price_pips, swap_pips=swap, pnl_pips=pnl,
             r_multiple=pnl / sl_pips,
-            spread_cost_pips=spr[e] / pip, slippage_cost_pips=n_market * costs.slippage_pips,
+            # スプレッドは買いなら約定時（ASK で買う）、売りなら決済時（ASK で買い戻す）に払う
+            spread_cost_pips=(spr[e] if d > 0 else spr[j]) / pip, slippage_cost_pips=n_market * costs.slippage_pips,
         ))
         # 決済足 j の確定時点のシグナルは決済後の情報なので利用可（cooldown_bars=0 の場合）
         next_allowed = j + max(cooldown_bars, 0)
