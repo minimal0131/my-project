@@ -60,7 +60,7 @@ costs:
     - {from: "2022-10-01", long: 1.5, short: -2.3}   # FF 3〜4%
     - {from: "2023-03-01", long: 1.9, short: -2.8}   # FF 4.75〜5.5%
     - {from: "2024-10-01", long: 1.5, short: -2.4}   # 利下げ・日銀利上げ
-    - {from: "2025-02-01", long: 1.2, short: -2.1}   # FF 4%台、日銀 0.5%
+    - {from: "2025-02-01", long: 0.2, short: -3.0}   # FF 4%台、日銀 0.5%。XM の現在値（2026-10 取得: +0.21 / -2.96）
   # swap_schedule が無い場合の固定値
   swap_long_pips_per_day: 1.2
   swap_short_pips_per_day: -2.1
